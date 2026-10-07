@@ -1,390 +1,84 @@
-# Formula 1 Incremental Data Loading Pipeline
+# Formula 1 Incremental Data Pipeline (Azure Databricks)
 
-An Azure Databricks data engineering project that implements **batch-based incremental data loading** for Formula 1 datasets using the **Medallion Architecture**, **Delta Lake**, **Unity Catalog**, and **Lakeflow Jobs**.
+A batch-based incremental data pipeline on Azure Databricks. It loads Formula 1 data through **Bronze → Silver → Gold** Delta Lake tables and processes only new data on each run, instead of rebuilding everything from scratch.
 
-## Project Overview
+**Tech stack:** Azure Databricks · PySpark · Spark SQL · Delta Lake · Unity Catalog · ADLS Gen2 · Lakeflow Jobs
 
-This project processes Formula 1 data incrementally rather than rebuilding the entire dataset on every execution.
+> Built as a hands-on learning project while following a Databricks data engineering course. The architecture and batch-control approach follow that course's design.
 
-The pipeline is designed around a simple batch-based approach:
+---
 
-- Identify the next available `batch_id`
-- Create a new batch
-- Process only the data belonging to that batch
-- Load the data through the Bronze, Silver, and Gold layers
-- Mark the batch as complete
+## Problem
 
-The course describes this approach as processing **only new data**, instead of processing all historical data during every execution.
+A full refresh reprocesses all historical data on every run, which becomes slow and expensive as data grows. This pipeline tracks which batches have been processed and loads only the new one.
 
 ## Architecture
 
 ```text
-                         Formula 1 Source Data
-                                  |
-                                  v
-                         +------------------+
-                         |     Landing      |
-                         |  Batch Data      |
-                         +--------+---------+
-                                  |
-                                  v
-                         +------------------+
-                         |      Bronze      |
-                         | Raw Delta Tables |
-                         +--------+---------+
-                                  |
-                                  v
-                         +------------------+
-                         |      Silver      |
-                         | Cleaned /        |
-                         | Standardized    |
-                         +--------+---------+
-                                  |
-                                  v
-                         +------------------+
-                         |       Gold       |
-                         | Analytics-ready  |
-                         | Delta Tables     |
-                         +--------+---------+
-                                  |
-                                  v
-                            BI / Analytics
+ Source files (landing area in ADLS, organised by dataset and batch_id)
+                          |
+                          v
+   Bronze  - raw Delta tables, schema enforced, load metadata added
+                          |
+                          v
+   Silver  - cleaned and standardised (duplicates and null keys removed)
+                          |
+                          v
+   Gold    - analytics-ready facts, dimensions and aggregates
 
-                    Orchestrated using
-                         Lakeflow Jobs
+   Orchestrated with Lakeflow Jobs | Governed with Unity Catalog
 ```
 
-The overall project follows the course's Bronze → Silver → Gold architecture, where Bronze is the controlled/raw entry point, Silver contains cleaned and standardized data, and Gold contains business-level analytical structures.
+## How incremental loading works
 
-## Technology Stack
+A `batch_control` table records the state of every batch (`batch_id`, `batch_status`).
 
-- **Azure Databricks**
-- **Apache Spark / PySpark**
-- **Spark SQL**
-- **Delta Lake**
-- **Unity Catalog**
-- **Azure Data Lake Storage (ADLS)**
-- **Lakeflow Jobs**
-- Python
-- SQL
+1. Identify the next batch to process.
+2. Register it as `in_progress`.
+3. Load only that batch through Bronze, Silver and Gold.
+4. Mark it `complete`.
 
-## Dataset
+Because status is stored per batch, an interrupted run stays visible as `in_progress` instead of looking finished.
 
-The project uses Formula 1 datasets covering:
+## Loading strategy by dataset
 
-- `circuits`
-- `races`
-- `constructors`
-- `drivers`
-- `results`
-- `sprints`
+| Dataset | Source behaviour | Write pattern |
+|---|---|---|
+| circuits, races, constructors, drivers | Mostly stable reference data | Append + Overwrite |
+| results, sprints | Records can change after first load | Append + Merge |
 
-The incremental project also uses a `batch_id` to identify individual data batches.
+Reference data can be replaced safely, while records that may change need a merge so updates don't create duplicates.
 
-Example:
+## Layers
+
+- **Bronze:** controlled entry point that keeps raw data, enforces schema and adds load metadata.
+- **Silver:** standardises column names, removes duplicates and filters rows with null business keys.
+- **Gold:** dimensional model for analytical questions such as driver performance by season and constructor performance over time.
+
+## Governance and orchestration
+
+- **Unity Catalog** organises data as catalog → schema → tables, with landing files kept separate from the Bronze, Silver and Gold tables.
+- Landing files are stored in **ADLS Gen2** and exposed through an external location.
+- A **Lakeflow Job** runs the notebooks in dependency order (batch control → Bronze → Silver → Gold → mark complete) with scheduling and run monitoring.
+
+## Repository structure
 
 ```text
-batch_id = 2025-01
+00-common/         shared helpers and configuration
+01-setup/          catalog, schema and external location setup
+02-bronze/         raw ingestion into Bronze tables
+03-silver/         cleaning and standardisation
+04-gold/           dimensional and analytics tables
+05-analytics/      analytical queries
+06-orchestration/  Lakeflow Job definition
 ```
 
-## Incremental Loading Strategy
+## Possible improvements
 
-### Full Refresh
+- Add automated data quality checks and alerting on failed runs.
+- Add CI/CD for notebook deployment.
+- Add streaming ingestion (e.g. Auto Loader) for near-real-time loading.
 
-In a full-refresh pipeline, every execution processes all available data.
+## License
 
-```text
-Batch 1 + Batch 2
-       |
-       v
-Bronze -> Silver -> Gold
-```
-
-This becomes inefficient as historical data grows.
-
-### Incremental Processing
-
-The project instead processes only the new batch.
-
-```text
-Batch 1
-  |
-  v
-Bronze -> Silver -> Gold
-
-Batch 2
-  |
-  v
-Only Batch 2 is processed
-```
-
-This reduces unnecessary processing of historical data.
-
-The course notes that there are multiple ways to build incremental pipelines and uses a **simple batch-based approach** for this project.
-
-## Batch Control
-
-A `batch_control` mechanism is used to manage the state of processing.
-
-Conceptually:
-
-```text
-                 +-------------------+
-                 |   batch_control   |
-                 +---------+---------+
-                           |
-                           v
-                    Identify Next Batch
-                           |
-                           v
-                     Create New Batch
-                           |
-                           v
-                      Process Batch
-                           |
-                           v
-                    Mark Batch Complete
-```
-
-The batch control information includes:
-
-- `batch_id`
-- `batch_status`
-
-Example status progression:
-
-```text
-2025-01 -> in_progress -> complete
-```
-
-This provides a simple way to determine which batch should be processed and whether a previous batch completed successfully.
-
-## Snapshot Data vs Change Data
-
-The incremental pipeline distinguishes between different types of source data.
-
-### Snapshot Data
-
-Snapshot-style datasets represent the current state of the source data.
-
-The project handles these datasets differently from datasets where individual records can change over time.
-
-### Change Data
-
-Change data contains new or changed records that need to be incorporated into the target tables.
-
-The project uses different loading patterns depending on the dataset's characteristics.
-
-## Loading Patterns
-
-The course's incremental-processing design uses different write strategies across the Formula 1 datasets.
-
-### Circuits, Races, Constructors and Drivers
-
-These datasets use a combination of:
-
-- Append
-- Overwrite
-
-across the relevant layers.
-
-### Results and Sprints
-
-These datasets use:
-
-- Append
-- Merge
-
-where changed records need to be incorporated.
-
-The exact write strategy is therefore dependent on whether the source behaves like snapshot data, historical data, or change data.
-
-## Medallion Architecture
-
-### Bronze Layer
-
-Purpose:
-
-- Controlled entry point for source data
-- Schema enforcement
-- Metadata addition
-- Raw data preservation
-
-The Bronze layer stores the ingested data as Delta tables.
-
-### Silver Layer
-
-Purpose:
-
-- Clean and standardize data
-- Remove duplicates
-- Remove invalid records
-- Reshape and structure data
-- Prepare data for analytics
-
-The course demonstrates transformations such as standardizing column names, removing duplicates, filtering null business keys, and making column values more consistent.
-
-### Gold Layer
-
-Purpose:
-
-- Business-level analytical structures
-- Dimensional modelling
-- Facts and dimensions
-- Aggregations for analytical queries
-
-The Gold layer supports Formula 1 analytical questions such as driver performance by season and constructor performance over time.
-
-## Data Governance
-
-The project uses **Unity Catalog** to organize and govern the data.
-
-The architecture follows the Unity Catalog hierarchy:
-
-```text
-Metastore
-   |
-   +-- Catalog
-         |
-         +-- Schema
-               |
-               +-- Tables
-               +-- Views
-               +-- Functions
-               +-- Volumes
-```
-
-The incremental project uses a Formula 1 catalog/schema structure and separates the landing files from the Bronze, Silver, and Gold Delta tables.
-
-## Storage
-
-The project uses Azure Data Lake Storage together with Unity Catalog.
-
-The incremental project setup includes an external location and landing area for the Formula 1 batch files.
-
-Conceptually:
-
-```text
-ADLS
- |
- +-- landing/
-       |
-       +-- circuits
-       +-- races
-       +-- constructors
-       +-- drivers
-       +-- results
-       +-- sprints
-       +-- batch_id
-```
-
-## Orchestration
-
-**Lakeflow Jobs** is used to orchestrate the production pipeline.
-
-The course describes Lakeflow Jobs as a mechanism for:
-
-- Running pipelines as coordinated workflows
-- Scheduling execution
-- Defining dependencies
-- Handling failures
-- Monitoring pipeline health
-
-A production workflow can therefore be structured around:
-
-```text
-Identify Batch
-      |
-      v
-Create Batch
-      |
-      v
-Ingest / Process
-      |
-      v
-Bronze
-      |
-      v
-Silver
-      |
-      v
-Gold
-      |
-      v
-Mark Batch Complete
-```
-
-## Why Incremental Loading?
-
-Incremental loading provides several advantages over full refreshes:
-
-- Processes less data per execution
-- Avoids repeatedly rebuilding historical data
-- Reduces unnecessary compute
-- Makes scheduled pipelines more scalable
-- Provides batch-level processing control
-- Makes production workflows easier to track
-
-The key principle used in this project is:
-
-> **Process new data instead of reprocessing all historical data on every run.**
-
-## Project Structure
-
-A suggested repository structure for implementing the project is:
-
-```text
-formula1-incremental-pipeline/
-|
-├── README.md
-|
-├── notebooks/
-│   ├── 01_batch_control
-│   ├── 02_bronze_ingestion
-│   ├── 03_silver_transformation
-│   └── 04_gold_transformation
-|
-├── jobs/
-│   └── formula1_incremental_job
-|
-├── sql/
-│   └── validation_queries
-|
-└── docs/
-    └── architecture.md
-```
-
-Adjust the notebook names to match the actual names used in your Databricks workspace.
-
-## Key Data Engineering Concepts Demonstrated
-
-This project demonstrates:
-
-- Incremental data loading
-- Batch-based processing
-- Batch control
-- Snapshot vs. change data
-- Append loading
-- Overwrite loading
-- Merge operations
-- Medallion Architecture
-- Delta Lake
-- ACID transactions
-- Data transformation with Spark
-- Unity Catalog
-- Azure Data Lake Storage
-- Lakeflow Jobs
-- Production pipeline orchestration
-
-## Learning Outcomes
-
-After completing this project, the main concepts demonstrated are:
-
-1. Designing a batch-based incremental pipeline.
-2. Tracking processing state using `batch_id` and `batch_status`.
-3. Loading new data without reprocessing all historical data.
-4. Applying different loading strategies based on source-data behavior.
-5. Building Bronze, Silver, and Gold Delta tables.
-6. Transforming Formula 1 datasets with Spark/PySpark.
-7. Organizing data using Unity Catalog.
-8. Orchestrating production processing with Lakeflow Jobs.
+Apache-2.0
