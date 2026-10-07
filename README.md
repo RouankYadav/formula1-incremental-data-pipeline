@@ -388,9 +388,3 @@ After completing this project, the main concepts demonstrated are:
 6. Transforming Formula 1 datasets with Spark/PySpark.
 7. Organizing data using Unity Catalog.
 8. Orchestrating production processing with Lakeflow Jobs.
-
-## Source
-
-This project README is based on the **Azure Databricks for Data Engineers – Hands-on Project using Spark, Delta Lake, Unity Catalog and Lakeflow Jobs** course material provided with this project.
-
-The course specifically presents the Formula 1 project, its Bronze/Silver/Gold architecture, batch-based incremental processing, batch control, and incremental project setup.
